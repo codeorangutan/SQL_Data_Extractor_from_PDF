@@ -3,6 +3,8 @@ import re
 import os
 import fitz
 import csv # PyMuPDF
+import pdfplumber
+import traceback
 
 DB_PATH = "cognitive_analysis.db"
 PDF_PATH = "34766-20231015201357.pdf"
@@ -430,3 +432,251 @@ def extract_npq_with_bounding_boxes(pdf, npq_pages):
     print(f"[DEBUG] Found {len(question_data)} questions via bounding boxes")
     
     return domain_data, question_data
+
+def extract_npq_questions_pymupdf(pdf_path, patient_id):
+    """Extract NPQ questions using PyMuPDF for better text extraction"""
+    doc = fitz.open(pdf_path)
+    questions = []
+    current_domain = None
+    
+    # Define severity mapping
+    severity_map = {
+        0: "Not a problem",
+        1: "Mild",
+        2: "Moderate",
+        3: "Severe"
+    }
+    
+    # Known domains for validation
+    domains = [
+        "Attention", "Impulsive", "Learning", "Memory", "Fatigue", "Sleep", 
+        "Anxiety", "Panic", "Agoraphobia", "Obsessions & Compulsions", "Social Anxiety", 
+        "PTSD", "Depression", "Bipolar", "Mood Stability", "Mania", "Aggression", 
+        "Autism", "Asperger's", "Psychotic", "Somatic", "Suicide", "Pain", 
+        "Substance Abuse", "MCI", "Concussion", "ADHD"
+    ]
+    
+    # Find NPQ pages
+    npq_pages = []
+    for page_idx in range(len(doc)):
+        page = doc[page_idx]
+        text = page.get_text()
+        if "NeuroPsych Questionnaire" in text or "Domain Score Severity" in text:
+            npq_pages.append(page_idx)
+            print(f"[DEBUG] Found NPQ on page {page_idx+1}")
+    
+    if not npq_pages:
+        print("[WARN] No NPQ pages found")
+        return []
+    
+    # Process NPQ pages
+    for page_idx in npq_pages:
+        page = doc[page_idx]
+        blocks = page.get_text("blocks")
+        blocks = sorted(blocks, key=lambda b: (b[1], b[0]))  # sort by y, then x
+        
+        for block in blocks:
+            text = block[4]
+            lines = text.splitlines()
+            
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Check for domain headers
+                for domain in domains:
+                    if domain == line or f"{domain}:" == line:
+                        current_domain = domain
+                        print(f"[DEBUG] Found domain header: {current_domain}")
+                        break
+                
+                # Check for questions (number followed by text)
+                question_match = re.match(r'^(\d+)\.\s+(.+)$', line)
+                if question_match:
+                    question_num = int(question_match.group(1))
+                    question_text = question_match.group(2).strip()
+                    
+                    # Look for score in the next line or at the end of this line
+                    score = None
+                    severity = None
+                    
+                    # Check if score is at the end of the question text
+                    score_match = re.search(r'(\d+)\s*$', question_text)
+                    if score_match:
+                        potential_score = int(score_match.group(1))
+                        if 0 <= potential_score <= 3:  # Valid NPQ score range
+                            score = potential_score
+                            severity = severity_map.get(score, "Unknown")
+                            # Remove the score from the question text
+                            question_text = question_text[:score_match.start()].strip()
+                    
+                    # If we found a valid question with score
+                    if question_text and score is not None and current_domain:
+                        print(f"[DEBUG] Found question: {question_num}, '{question_text[:40]}...', domain: {current_domain}, score: {score}")
+                        questions.append((patient_id, current_domain, question_num, question_text, score, severity))
+    
+    print(f"[DEBUG] Total NPQ questions extracted: {len(questions)}")
+    return questions
+
+def parse_npq_scores(lines):
+    """Parse NPQ domain scores from extracted text lines"""
+    domain_scores = []
+    domain_pattern = re.compile(r'^([A-Za-z\'& ]+)\s+(\d+)\s+(Severe|Moderate|Mild|Not a problem)$')
+    
+    # Also try to match lines with domain and score on separate lines
+    current_domain = None
+    current_score = None
+    
+    for line in lines:
+        # Try direct pattern match first
+        match = domain_pattern.match(line)
+        if match:
+            domain = match.group(1).strip()
+            score = int(match.group(2))
+            severity = match.group(3)
+            domain_scores.append((domain, score, severity))
+            print(f"[DEBUG] Direct match - Domain: {domain}, Score: {score}, Severity: {severity}")
+            continue
+        
+        # If no direct match, try to identify domain names, scores, and severities separately
+        if any(domain in line for domain in [
+            "Attention", "Impulsive", "Learning", "Memory", "Fatigue", "Sleep", 
+            "Anxiety", "Panic", "Agoraphobia", "Obsessions & Compulsions", "Social Anxiety", 
+            "PTSD", "Depression", "Bipolar", "Mood Stability", "Mania", "Aggression", 
+            "Autism", "Asperger's", "Psychotic", "Somatic", "Suicide", "Pain", 
+            "Substance Abuse", "MCI", "Concussion", "ADHD"
+        ]):
+            # This line likely contains a domain name
+            current_domain = line.strip()
+            current_score = None
+            print(f"[DEBUG] Found potential domain: {current_domain}")
+        
+        # Check if this line contains just a number (potential score)
+        elif line.strip().isdigit() and current_domain and not current_score:
+            current_score = int(line.strip())
+            print(f"[DEBUG] Found potential score for {current_domain}: {current_score}")
+        
+        # Check if this line contains a severity level
+        elif current_domain and current_score and any(severity in line for severity in ["Severe", "Moderate", "Mild", "Not a problem"]):
+            for severity in ["Severe", "Moderate", "Mild", "Not a problem"]:
+                if severity in line:
+                    domain_scores.append((current_domain, current_score, severity))
+                    print(f"[DEBUG] Assembled match - Domain: {current_domain}, Score: {current_score}, Severity: {severity}")
+                    current_domain = None
+                    current_score = None
+                    break
+    
+    return domain_scores
+
+def insert_npq_scores(domain_scores, patient_id, conn=None):
+    """Insert NPQ domain scores into the database"""
+    close_conn = False
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH)
+        close_conn = True
+    
+    cur = conn.cursor()
+    
+    # First, delete any existing records for this patient
+    cur.execute("DELETE FROM npq_scores WHERE patient_id = ?", (patient_id,))
+    
+    # Insert new records
+    for domain, score, severity in domain_scores:
+        # Add a description based on severity
+        description = ""
+        if severity == "Severe":
+            description = "Clinically significant, requires attention"
+        elif severity == "Moderate":
+            description = "Potentially significant, monitor closely"
+        elif severity == "Mild":
+            description = "Mild concern, may benefit from monitoring"
+        else:
+            description = "Not clinically significant"
+        
+        cur.execute("""
+            INSERT INTO npq_scores (patient_id, domain, score, severity, description)
+            VALUES (?, ?, ?, ?, ?)
+        """, (patient_id, domain, score, severity, description))
+    
+    conn.commit()
+    
+    if close_conn:
+        conn.close()
+    
+    print(f"[INFO] Inserted {len(domain_scores)} NPQ domain scores for patient {patient_id}")
+
+def extract_and_insert_npq_scores(pdf_path, patient_id, conn=None):
+    """Extract and insert NPQ domain scores"""
+    try:
+        # Extract NPQ text
+        npq_lines = extract_npq_text(pdf_path)
+        
+        # Try table-based extraction first
+        domain_data, _ = extract_npq_table(pdf_path)
+        
+        # If table extraction didn't work, try parsing from text
+        if not domain_data:
+            domain_data = parse_npq_scores(npq_lines)
+        
+        # Insert into database
+        if domain_data:
+            insert_npq_scores(domain_data, patient_id, conn)
+            return True
+        else:
+            print("[WARN] No NPQ domain scores found to insert")
+            return False
+    
+    except Exception as e:
+        print(f"Error extracting/inserting NPQ scores: {e}")
+        traceback.print_exc()
+        return False
+
+def insert_npq_questions(questions, conn=None):
+    """Insert NPQ questions into the database"""
+    close_conn = False
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH)
+        close_conn = True
+    
+    cur = conn.cursor()
+    
+    # If we have questions, first delete any existing records for this patient
+    if questions:
+        patient_id = questions[0][0]  # First element of first tuple
+        cur.execute("DELETE FROM npq_questions WHERE patient_id = ?", (patient_id,))
+        
+        # Use executemany for better performance
+        cur.executemany("""
+            INSERT INTO npq_questions (patient_id, domain, question_number, question_text, score, severity)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, questions)
+        
+        conn.commit()
+        print(f"[INFO] Inserted {len(questions)} NPQ questions for patient {patient_id}")
+    else:
+        print("[WARN] No NPQ questions to insert")
+    
+    if close_conn:
+        conn.close()
+    
+    return len(questions) > 0
+
+def extract_and_insert_npq_questions(pdf_path, patient_id, conn=None):
+    """Extract and insert NPQ questions"""
+    try:
+        # Extract questions using PyMuPDF for better text extraction
+        questions = extract_npq_questions_pymupdf(pdf_path, patient_id)
+        
+        # Insert into database
+        if questions:
+            success = insert_npq_questions(questions, conn)
+            return success
+        else:
+            print("[WARN] No NPQ questions found to insert")
+            return False
+    
+    except Exception as e:
+        print(f"Error extracting/inserting NPQ questions: {e}")
+        traceback.print_exc()
+        return False
