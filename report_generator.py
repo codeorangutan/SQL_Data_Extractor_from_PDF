@@ -341,3 +341,49 @@ def create_npq_section(data):
             elements.append(Spacer(1, 15))
     
     return elements
+
+def draw_logo(canvas, doc):
+    logo_path = "imgs/LogoWB.png"
+    logo_width = 40 * mm
+    logo_height = 40 * mm
+    x = doc.pagesize[0] - logo_width - 20  # right margin
+    y = doc.pagesize[1] - logo_height - 20  # top margin
+    canvas.drawImage(logo_path, x, y, width=logo_width, height=logo_height, preserveAspectRatio=True, mask='auto')
+
+
+def create_section_title(title):
+    return Paragraph(f'<b>{title}</b>', getSampleStyleSheet()['Heading2'])
+
+
+def color_for_percentile(p):
+    if p is None:
+        return colors.lightgrey
+    if p > 74:
+        return colors.green
+    elif 25 <= p <= 74:
+        return colors.lightgreen
+    elif 9 <= p < 25:
+        return colors.khaki
+    elif 2 <= p < 9:
+        return colors.orange
+    else:
+        return colors.red
+
+
+def get_percentile_color(percentile):
+    if percentile is None or percentile == "":
+        return colors.white
+    try:
+        percentile = float(percentile)
+        if percentile > 75:
+            return colors.HexColor('#b3e6b3')  # Above average (> 75)
+        elif percentile >= 25:
+            return colors.HexColor('#ccffcc')  # Average (25-75)
+        elif percentile >= 9:
+            return colors.HexColor('#ffff99')  # Low average (9-25)
+        elif percentile >= 2:
+            return colors.HexColor('#ffcc99')  # Low (2-9)
+        else:
+            return colors.HexColor('#ff9999')  # Very low (≤ 2)
+    except (ValueError, TypeError):
+        return colors.white
