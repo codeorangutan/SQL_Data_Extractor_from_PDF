@@ -123,9 +123,9 @@ def get_subtest_results(patient_id, db_path="cognitive_analysis.db"):
     try:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
-        results = cur.execute("SELECT * FROM subtest_results WHERE patient_id = ?", (patient_id,)).fetchall()
+        subtests = cur.execute("SELECT * FROM subtest_results WHERE patient_id = ?", (patient_id,)).fetchall()
         conn.close()
-        return results
+        return subtests
     except Exception as e:
         debug_log(f"[ERROR] Error getting subtest results: {e}")
         return []
@@ -135,9 +135,9 @@ def get_asrs_responses(patient_id, db_path="cognitive_analysis.db"):
     try:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
-        responses = cur.execute("SELECT * FROM asrs_responses WHERE patient_id = ?", (patient_id,)).fetchall()
+        asrs = cur.execute("SELECT * FROM asrs_responses WHERE patient_id = ?", (patient_id,)).fetchall()
         conn.close()
-        return responses
+        return asrs
     except Exception as e:
         debug_log(f"[ERROR] Error getting ASRS responses: {e}")
         return []
@@ -147,10 +147,10 @@ def get_dass_data(patient_id, db_path="cognitive_analysis.db"):
     try:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
-        scores = cur.execute("SELECT * FROM dass21_scores WHERE patient_id = ?", (patient_id,)).fetchall()
-        responses = cur.execute("SELECT * FROM dass21_responses WHERE patient_id = ?", (patient_id,)).fetchall()
+        summary = cur.execute("SELECT * FROM dass21_scores WHERE patient_id = ?", (patient_id,)).fetchall()
+        items = cur.execute("SELECT * FROM dass21_responses WHERE patient_id = ?", (patient_id,)).fetchall()
         conn.close()
-        return {"summary": scores, "items": responses}
+        return {"summary": summary, "items": items}
     except Exception as e:
         debug_log(f"[ERROR] Error getting DASS data: {e}")
         return {"summary": [], "items": []}
@@ -160,9 +160,9 @@ def get_epworth_scores(patient_id, db_path="cognitive_analysis.db"):
     try:
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
-        scores = cur.execute("SELECT * FROM epworth_scores WHERE patient_id = ?", (patient_id,)).fetchall()
+        epworth = cur.execute("SELECT * FROM epworth_scores WHERE patient_id = ?", (patient_id,)).fetchall()
         conn.close()
-        return scores
+        return epworth
     except Exception as e:
         debug_log(f"[ERROR] Error getting Epworth scores: {e}")
         return []
@@ -190,13 +190,16 @@ def get_domain_scores_for_radar(patient_id, db_path="cognitive_analysis.db"):
     invalid_domains = []
     
     try:
+        # Connect to the database
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         
-        # Query cognitive_scores table
+        # Query to get standard scores for each domain
         query = """
         SELECT 
             domain, 
+            patient_score, 
+            standard_score, 
             percentile,
             validity_index
         FROM cognitive_scores 
@@ -204,32 +207,32 @@ def get_domain_scores_for_radar(patient_id, db_path="cognitive_analysis.db"):
         """
         
         cursor.execute(query, (patient_id,))
-        scores = cursor.fetchall()
+        domain_results = cursor.fetchall()
+        
+        debug_log(f"Domain results from database: {domain_results}")
+        
+        if not domain_results:
+            debug_log(f"No cognitive domains found for patient {patient_id}")
+            return {}, []
         
         # Process each domain
-        for score in scores:
-            domain, percentile, validity_index = score
-            debug_log(f"Processing domain: {domain}, percentile: {percentile}, validity: {validity_index}")
+        for result in domain_results:
+            domain_name, raw_score, standard_score, percentile, validity_index = result
             
-            # Standardize domain names
-            std_domain_name = domain.strip()
-            # Handle special cases
-            if "Verbal Memory" in std_domain_name:
-                std_domain_name = "Verbal Memory"
-            elif "Visual Memory" in std_domain_name:
-                std_domain_name = "Visual Memory"
-            elif "Psychomotor Speed" in std_domain_name:
-                std_domain_name = "Psychomotor Speed"
-            elif "Reaction Time" in std_domain_name:
-                std_domain_name = "Reaction Time"
-            elif "Complex Attention" in std_domain_name:
-                std_domain_name = "Complex Attention"
-            elif "Cognitive Flexibility" in std_domain_name:
-                std_domain_name = "Cognitive Flexibility"
-            elif "Processing Speed" in std_domain_name:
-                std_domain_name = "Processing Speed"
-            elif "Executive Function" in std_domain_name:
-                std_domain_name = "Executive Function"
+            # Check if this is a known domain we want to include
+            domain_mapping = {
+                "Verbal Memory": "Verbal Memory",
+                "Visual Memory": "Visual Memory", 
+                "Psychomotor Speed": "Psychomotor Speed",
+                "Reaction Time": "Reaction Time",
+                "Complex Attention": "Complex Attention",
+                "Cognitive Flexibility": "Cognitive Flexibility",
+                "Processing Speed": "Processing Speed",
+                "Executive Function": "Executive Function",
+            }
+            
+            # Get the standardized domain name if it exists, otherwise use as-is
+            std_domain_name = domain_mapping.get(domain_name, domain_name)
             
             # Add to percentiles dictionary
             try:
